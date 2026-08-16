@@ -250,7 +250,6 @@ def ml_get(endpoint, params=None):
 # ============================================================
 
 def buscar_produtos():
-
     consultas = [
         "celular",
         "notebook",
@@ -260,26 +259,40 @@ def buscar_produtos():
         "teclado",
         "monitor",
         "air fryer",
-        "casa",
         "eletronicos"
     ]
 
     produtos = {}
 
+    access_token = get_access_token()
+
     for consulta in consultas:
 
         try:
-
             response = requests.get(
                 ML_API_URL + "/sites/MLB/search",
                 params={
                     "q": consulta,
-                    "limit": 20
+                    "limit": 20,
+                    "offset": 0
+                },
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                    "User-Agent": "MegaDesconto/1.0"
                 },
                 timeout=30
             )
 
+            print(
+                f"[ML] Busca '{consulta}' "
+                f"-> HTTP {response.status_code}"
+            )
+
             if not response.ok:
+                print(
+                    f"[ML] ERRO: {response.text[:1000]}"
+                )
                 continue
 
             data = response.json()
@@ -289,6 +302,11 @@ def buscar_produtos():
                 []
             )
 
+            print(
+                f"[ML] '{consulta}' "
+                f"encontrou {len(resultados)} produtos"
+            )
+
             for produto in resultados:
 
                 item_id = produto.get("id")
@@ -296,14 +314,19 @@ def buscar_produtos():
                 if item_id:
                     produtos[item_id] = produto
 
-        except Exception:
-            continue
+        except Exception as e:
 
-    return list(
-        produtos.values()
+            print(
+                f"[ML] EXCEÇÃO na busca "
+                f"'{consulta}': {repr(e)}"
+            )
+
+    print(
+        f"[ML] TOTAL DE PRODUTOS ENCONTRADOS: "
+        f"{len(produtos)}"
     )
 
-
+    return list(produtos.values())
 # ============================================================
 # OBTER PREÇOS DO PRODUTO
 # ============================================================
