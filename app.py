@@ -203,6 +203,21 @@ def ml_get(endpoint, params=None):
 
 def buscar_produtos():
 
+    print("====================================")
+print("PRODUTOS ENCONTRADOS:", len(produtos))
+print("====================================")
+
+for p in produtos[:10]:
+    print(
+        p.get("id"),
+        "|",
+        p.get("title"),
+        "|",
+        p.get("price"),
+        "|",
+        p.get("original_price")
+    )
+
     consultas = [
         "ofertas",
         "eletronicos",
