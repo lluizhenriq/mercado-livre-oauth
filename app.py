@@ -1,4 +1,3 @@
-```python
 from flask import Flask, request
 import os
 import requests
@@ -21,13 +20,12 @@ ML_API_URL = "https://api.mercadolibre.com"
 
 SITE_ID = "MLB"
 
-# Filtros das ofertas
 DESCONTO_MINIMO = 20
 PRECO_MINIMO = 20
 PRECO_MAXIMO = 5000
 
-# Quantidade máxima de produtos por pesquisa
 PRODUTOS_POR_BUSCA = 10
+
 
 # ============================================================
 # TOKENS
@@ -87,7 +85,6 @@ def save_tokens(data):
         data.get("expires_in", 21600)
     )
 
-    # Renova 5 minutos antes de expirar
     tokens["expires_at"] = (
         time.time() + expires_in - 300
     )
@@ -226,7 +223,6 @@ def ml_get(endpoint, params=None):
         timeout=30
     )
 
-    # Access Token expirado/inválido
     if response.status_code == 401:
 
         refresh_access_token()
@@ -257,13 +253,6 @@ def ml_get(endpoint, params=None):
 
 # ============================================================
 # BUSCAR PRODUTOS
-#
-# IMPORTANTE:
-# Não usamos /sites/MLB/search porque esse endpoint
-# está retornando 403 para sua aplicação.
-#
-# Usamos o buscador oficial:
-# /products/search
 # ============================================================
 
 def buscar_produtos():
@@ -308,7 +297,7 @@ def buscar_produtos():
 
             print(
                 f"[ML] '{consulta}' -> "
-                f"{len(resultados)} produtos de catálogo"
+                f"{len(resultados)} produtos"
             )
 
             for produto in resultados:
@@ -327,18 +316,21 @@ def buscar_produtos():
                 except Exception as e:
 
                     print(
-                        f"[ML] Não foi possível obter "
-                        f"produto {product_id}: {e}"
+                        f"[ML] Erro no produto "
+                        f"{product_id}: {e}"
                     )
 
                     continue
 
-                # O produto pode possuir um vencedor
                 buy_box = detalhe.get(
                     "buy_box_winner"
                 )
 
                 if not buy_box:
+                    print(
+                        f"[ML] Produto {product_id} "
+                        f"sem buy_box_winner"
+                    )
                     continue
 
                 item_id = buy_box.get(
@@ -348,7 +340,6 @@ def buscar_produtos():
                 if not item_id:
                     continue
 
-                # Agora pegamos o anúncio real
                 try:
 
                     item = ml_get(
@@ -358,7 +349,7 @@ def buscar_produtos():
                 except Exception as e:
 
                     print(
-                        f"[ML] Erro ao obter item "
+                        f"[ML] Erro no item "
                         f"{item_id}: {e}"
                     )
 
@@ -384,181 +375,79 @@ def buscar_produtos():
 
 
 # ============================================================
-# OBTER PREÇOS DO PRODUTO
-# ============================================================
-
-def obter_precos(item_id):
-
-    data = ml_get(
-        "/items/" + item_id + "/prices"
-    )
-
-    return data.get(
-        "prices",
-        []
-    )
-
-
-# ============================================================
 # ENCONTRAR PROMOÇÃO
 # ============================================================
 
 def encontrar_promocao(item_id):
 
-    # --------------------------------------------------------
-    # PRIMEIRO: tentamos o endpoint /prices
-    # --------------------------------------------------------
-
     try:
 
-        precos = obter_precos(
-            item_id
+        item = ml_get(
+            "/items/" + item_id
         )
 
     except Exception as e:
 
         print(
-            f"[ML] Não conseguiu consultar preços "
-            f"do item {item_id}: {e}"
+            f"[ML] Erro ao consultar item "
+            f"{item_id}: {e}"
         )
 
-        precos = []
+        return None
 
-    melhor_oferta = None
+    valor = item.get("price")
 
-    for preco in precos:
+    valor_original = item.get(
+        "original_price"
+    )
 
-        valor = preco.get(
-            "amount"
-        )
+    if valor is None:
 
-        valor_original = preco.get(
-            "regular_amount"
-        )
+        return None
 
-        if valor is None:
-            continue
+    if valor_original is None:
 
-        if valor_original is None:
-            continue
+        return None
 
-        try:
+    try:
 
-            valor = float(valor)
-            valor_original = float(
-                valor_original
-            )
+        valor = float(valor)
+        valor_original = float(valor_original)
 
-        except (TypeError, ValueError):
+    except (TypeError, ValueError):
 
-            continue
+        return None
 
-        if valor_original <= valor:
-            continue
+    if valor_original <= valor:
 
-        if valor < PRECO_MINIMO:
-            continue
+        return None
 
-        if valor > PRECO_MAXIMO:
-            continue
+    if valor < PRECO_MINIMO:
 
-        desconto = (
-            (valor_original - valor)
-            / valor_original
-        ) * 100
+        return None
 
-        if desconto < DESCONTO_MINIMO:
-            continue
+    if valor > PRECO_MAXIMO:
 
-        oferta = {
+        return None
 
-            "preco": valor,
+    desconto = (
+        (valor_original - valor)
+        / valor_original
+    ) * 100
 
-            "preco_original":
-                valor_original,
+    if desconto < DESCONTO_MINIMO:
 
-            "desconto":
-                desconto
-        }
+        return None
 
-        if melhor_oferta is None:
-
-            melhor_oferta = oferta
-
-        elif desconto > melhor_oferta["desconto"]:
-
-            melhor_oferta = oferta
-
-    # --------------------------------------------------------
-    # SEGUNDO: se /prices não encontrar, usamos os campos
-    # de preço do próprio item.
-    # --------------------------------------------------------
-
-    if melhor_oferta is None:
-
-        try:
-
-            item = ml_get(
-                "/items/" + item_id
-            )
-
-            valor = item.get(
-                "price"
-            )
-
-            valor_original = item.get(
-                "original_price"
-            )
-
-            if (
-                valor is not None
-                and valor_original is not None
-            ):
-
-                valor = float(valor)
-                valor_original = float(
-                    valor_original
-                )
-
-                if (
-                    valor_original > valor
-                    and PRECO_MINIMO <= valor <= PRECO_MAXIMO
-                ):
-
-                    desconto = (
-                        (
-                            valor_original
-                            - valor
-                        )
-                        / valor_original
-                    ) * 100
-
-                    if desconto >= DESCONTO_MINIMO:
-
-                        melhor_oferta = {
-
-                            "preco":
-                                valor,
-
-                            "preco_original":
-                                valor_original,
-
-                            "desconto":
-                                desconto
-                        }
-
-        except Exception as e:
-
-            print(
-                f"[ML] Erro no fallback de preço "
-                f"{item_id}: {e}"
-            )
-
-    return melhor_oferta
+    return {
+        "preco": valor,
+        "preco_original": valor_original,
+        "desconto": desconto
+    }
 
 
 # ============================================================
-# ENVIAR MENSAGEM PARA TELEGRAM
+# ENVIAR TELEGRAM
 # ============================================================
 
 def enviar_telegram(produto):
@@ -642,13 +531,11 @@ def enviar_telegram(produto):
             "https://api.telegram.org/bot"
             + bot_token
             + "/sendPhoto",
-
             json={
                 "chat_id": chat_id,
                 "photo": imagem,
                 "caption": texto
             },
-
             timeout=30
         )
 
@@ -658,12 +545,10 @@ def enviar_telegram(produto):
             "https://api.telegram.org/bot"
             + bot_token
             + "/sendMessage",
-
             json={
                 "chat_id": chat_id,
                 "text": texto
             },
-
             timeout=30
         )
 
@@ -788,15 +673,9 @@ def autorizar():
         )
 
     parametros = {
-
-        "response_type":
-            "code",
-
-        "client_id":
-            client_id,
-
-        "redirect_uri":
-            REDIRECT_URI
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": REDIRECT_URI
     }
 
     url = (
@@ -850,7 +729,10 @@ def callback():
 
         return f"""
         <h1>❌ Erro na autorização</h1>
-        <p>{escape(erro)}</p>
+
+        <p>
+            {escape(erro)}
+        </p>
         """, 400
 
     code = request.args.get(
@@ -988,8 +870,7 @@ def buscar_teste():
             </p>
 
             <p>
-                Veja os logs do Render para descobrir
-                exatamente em qual consulta ocorreu o problema.
+                Confira os logs do Render.
             </p>
 
             <a href="/">
@@ -1129,24 +1010,12 @@ def oferta_teste():
             )
 
             oferta = {
-
-                "titulo":
-                    titulo,
-
-                "preco":
-                    promocao["preco"],
-
-                "preco_original":
-                    promocao["preco_original"],
-
-                "desconto":
-                    promocao["desconto"],
-
-                "imagem":
-                    imagem,
-
-                "link":
-                    link
+                "titulo": titulo,
+                "preco": promocao["preco"],
+                "preco_original": promocao["preco_original"],
+                "desconto": promocao["desconto"],
+                "imagem": imagem,
+                "link": link
             }
 
             enviar_telegram(
@@ -1194,9 +1063,8 @@ def oferta_teste():
         </p>
 
         <p>
-            Nenhum dos produtos encontrados
-            possui um desconto compatível com
-            os filtros atuais.
+            Nenhum produto encontrado possui
+            desconto compatível com os filtros atuais.
         </p>
 
         <p>
@@ -1279,4 +1147,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
-```
