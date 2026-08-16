@@ -1,9 +1,11 @@
+```python
 from flask import Flask, request
 import os
 import requests
 import time
 import threading
 from urllib.parse import urlencode
+from html import escape
 
 app = Flask(__name__)
 
@@ -17,10 +19,15 @@ ML_AUTH_URL = "https://auth.mercadolivre.com.br/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
 
+SITE_ID = "MLB"
+
 # Filtros das ofertas
 DESCONTO_MINIMO = 20
 PRECO_MINIMO = 20
 PRECO_MAXIMO = 5000
+
+# Quantidade máxima de produtos por pesquisa
+PRODUTOS_POR_BUSCA = 10
 
 # ============================================================
 # TOKENS
@@ -40,6 +47,7 @@ token_lock = threading.Lock()
 # ============================================================
 
 def get_credentials():
+
     client_id = os.environ.get("ML_CLIENT_ID")
     client_secret = os.environ.get("ML_CLIENT_SECRET")
 
@@ -110,6 +118,7 @@ def exchange_code_for_token(code):
     )
 
     if not response.ok:
+
         raise RuntimeError(
             "Erro ao trocar código por token:\n"
             + response.text
@@ -135,6 +144,7 @@ def refresh_access_token():
         )
 
         if not refresh_token:
+
             raise RuntimeError(
                 "Refresh Token não encontrado. "
                 "É necessário autorizar novamente."
@@ -158,6 +168,7 @@ def refresh_access_token():
         )
 
         if not response.ok:
+
             raise RuntimeError(
                 "Erro ao renovar Access Token:\n"
                 + response.text
@@ -181,6 +192,7 @@ def get_access_token():
     )
 
     if not access_token:
+
         raise RuntimeError(
             "Mercado Livre não está autorizado. "
             "Acesse /autorizar."
@@ -214,14 +226,12 @@ def ml_get(endpoint, params=None):
         timeout=30
     )
 
-    # Access Token inválido/expirado
+    # Access Token expirado/inválido
     if response.status_code == 401:
 
         refresh_access_token()
 
-        access_token = tokens[
-            "access_token"
-        ]
+        access_token = tokens["access_token"]
 
         response = requests.get(
             ML_API_URL + endpoint,
@@ -247,9 +257,17 @@ def ml_get(endpoint, params=None):
 
 # ============================================================
 # BUSCAR PRODUTOS
+#
+# IMPORTANTE:
+# Não usamos /sites/MLB/search porque esse endpoint
+# está retornando 403 para sua aplicação.
+#
+# Usamos o buscador oficial:
+# /products/search
 # ============================================================
 
 def buscar_produtos():
+
     consultas = [
         "celular",
         "notebook",
@@ -264,38 +282,24 @@ def buscar_produtos():
 
     produtos = {}
 
-    access_token = get_access_token()
-
     for consulta in consultas:
 
         try:
-            response = requests.get(
-                ML_API_URL + "/sites/MLB/search",
-                params={
-                    "q": consulta,
-                    "limit": 20,
-                    "offset": 0
-                },
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "Accept": "application/json",
-                    "User-Agent": "MegaDesconto/1.0"
-                },
-                timeout=30
-            )
 
             print(
-                f"[ML] Busca '{consulta}' "
-                f"-> HTTP {response.status_code}"
+                f"[ML] Buscando catálogo: '{consulta}'"
             )
 
-            if not response.ok:
-                print(
-                    f"[ML] ERRO: {response.text[:1000]}"
-                )
-                continue
-
-            data = response.json()
+            data = ml_get(
+                "/products/search",
+                params={
+                    "status": "active",
+                    "site_id": SITE_ID,
+                    "q": consulta,
+                    "limit": PRODUTOS_POR_BUSCA,
+                    "offset": 0
+                }
+            )
 
             resultados = data.get(
                 "results",
@@ -303,16 +307,66 @@ def buscar_produtos():
             )
 
             print(
-                f"[ML] '{consulta}' "
-                f"encontrou {len(resultados)} produtos"
+                f"[ML] '{consulta}' -> "
+                f"{len(resultados)} produtos de catálogo"
             )
 
             for produto in resultados:
 
-                item_id = produto.get("id")
+                product_id = produto.get("id")
 
-                if item_id:
-                    produtos[item_id] = produto
+                if not product_id:
+                    continue
+
+                try:
+
+                    detalhe = ml_get(
+                        "/products/" + product_id
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"[ML] Não foi possível obter "
+                        f"produto {product_id}: {e}"
+                    )
+
+                    continue
+
+                # O produto pode possuir um vencedor
+                buy_box = detalhe.get(
+                    "buy_box_winner"
+                )
+
+                if not buy_box:
+                    continue
+
+                item_id = buy_box.get(
+                    "item_id"
+                )
+
+                if not item_id:
+                    continue
+
+                # Agora pegamos o anúncio real
+                try:
+
+                    item = ml_get(
+                        "/items/" + item_id
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"[ML] Erro ao obter item "
+                        f"{item_id}: {e}"
+                    )
+
+                    continue
+
+                item["catalog_product_id"] = product_id
+
+                produtos[item_id] = item
 
         except Exception as e:
 
@@ -322,11 +376,13 @@ def buscar_produtos():
             )
 
     print(
-        f"[ML] TOTAL DE PRODUTOS ENCONTRADOS: "
-        f"{len(produtos)}"
+        "[ML] TOTAL DE PRODUTOS ENCONTRADOS: "
+        + str(len(produtos))
     )
 
     return list(produtos.values())
+
+
 # ============================================================
 # OBTER PREÇOS DO PRODUTO
 # ============================================================
@@ -349,9 +405,24 @@ def obter_precos(item_id):
 
 def encontrar_promocao(item_id):
 
-    precos = obter_precos(
-        item_id
-    )
+    # --------------------------------------------------------
+    # PRIMEIRO: tentamos o endpoint /prices
+    # --------------------------------------------------------
+
+    try:
+
+        precos = obter_precos(
+            item_id
+        )
+
+    except Exception as e:
+
+        print(
+            f"[ML] Não conseguiu consultar preços "
+            f"do item {item_id}: {e}"
+        )
+
+        precos = []
 
     melhor_oferta = None
 
@@ -379,6 +450,7 @@ def encontrar_promocao(item_id):
             )
 
         except (TypeError, ValueError):
+
             continue
 
         if valor_original <= valor:
@@ -399,18 +471,88 @@ def encontrar_promocao(item_id):
             continue
 
         oferta = {
+
             "preco": valor,
-            "preco_original": valor_original,
-            "desconto": desconto
+
+            "preco_original":
+                valor_original,
+
+            "desconto":
+                desconto
         }
 
         if melhor_oferta is None:
+
             melhor_oferta = oferta
 
-        elif desconto > melhor_oferta[
-            "desconto"
-        ]:
+        elif desconto > melhor_oferta["desconto"]:
+
             melhor_oferta = oferta
+
+    # --------------------------------------------------------
+    # SEGUNDO: se /prices não encontrar, usamos os campos
+    # de preço do próprio item.
+    # --------------------------------------------------------
+
+    if melhor_oferta is None:
+
+        try:
+
+            item = ml_get(
+                "/items/" + item_id
+            )
+
+            valor = item.get(
+                "price"
+            )
+
+            valor_original = item.get(
+                "original_price"
+            )
+
+            if (
+                valor is not None
+                and valor_original is not None
+            ):
+
+                valor = float(valor)
+                valor_original = float(
+                    valor_original
+                )
+
+                if (
+                    valor_original > valor
+                    and PRECO_MINIMO <= valor <= PRECO_MAXIMO
+                ):
+
+                    desconto = (
+                        (
+                            valor_original
+                            - valor
+                        )
+                        / valor_original
+                    ) * 100
+
+                    if desconto >= DESCONTO_MINIMO:
+
+                        melhor_oferta = {
+
+                            "preco":
+                                valor,
+
+                            "preco_original":
+                                valor_original,
+
+                            "desconto":
+                                desconto
+                        }
+
+        except Exception as e:
+
+            print(
+                f"[ML] Erro no fallback de preço "
+                f"{item_id}: {e}"
+            )
 
     return melhor_oferta
 
@@ -430,30 +572,33 @@ def enviar_telegram(produto):
     )
 
     if not bot_token:
+
         raise RuntimeError(
             "TELEGRAM_BOT_TOKEN não configurado."
         )
 
     if not chat_id:
+
         raise RuntimeError(
             "TELEGRAM_CHAT_ID não configurado."
         )
 
-    titulo = produto[
-        "titulo"
-    ]
+    titulo = produto.get(
+        "titulo",
+        "Produto"
+    )
 
-    preco = produto[
-        "preco"
-    ]
+    preco = float(
+        produto["preco"]
+    )
 
-    preco_original = produto[
-        "preco_original"
-    ]
+    preco_original = float(
+        produto["preco_original"]
+    )
 
-    desconto = produto[
-        "desconto"
-    ]
+    desconto = float(
+        produto["desconto"]
+    )
 
     link = produto.get(
         "link",
@@ -464,7 +609,6 @@ def enviar_telegram(produto):
         "imagem"
     )
 
-    # Formatação brasileira
     preco_formatado = (
         f"R$ {preco:,.2f}"
         .replace(",", "X")
@@ -490,7 +634,6 @@ def enviar_telegram(produto):
         f"{link}"
     )
 
-    # Telegram limita caption de foto.
     texto = texto[:1000]
 
     if imagem:
@@ -499,11 +642,13 @@ def enviar_telegram(produto):
             "https://api.telegram.org/bot"
             + bot_token
             + "/sendPhoto",
+
             json={
                 "chat_id": chat_id,
                 "photo": imagem,
                 "caption": texto
             },
+
             timeout=30
         )
 
@@ -513,10 +658,12 @@ def enviar_telegram(produto):
             "https://api.telegram.org/bot"
             + bot_token
             + "/sendMessage",
+
             json={
                 "chat_id": chat_id,
                 "text": texto
             },
+
             timeout=30
         )
 
@@ -543,6 +690,7 @@ def home():
     <html lang="pt-BR">
 
     <head>
+
         <meta charset="UTF-8">
 
         <title>Mega Desconto</title>
@@ -640,9 +788,15 @@ def autorizar():
         )
 
     parametros = {
-        "response_type": "code",
-        "client_id": client_id,
-        "redirect_uri": REDIRECT_URI
+
+        "response_type":
+            "code",
+
+        "client_id":
+            client_id,
+
+        "redirect_uri":
+            REDIRECT_URI
     }
 
     url = (
@@ -696,7 +850,7 @@ def callback():
 
         return f"""
         <h1>❌ Erro na autorização</h1>
-        <p>{erro}</p>
+        <p>{escape(erro)}</p>
         """, 400
 
     code = request.args.get(
@@ -746,7 +900,7 @@ def callback():
         return f"""
         <h1>❌ Erro</h1>
 
-        <pre>{e}</pre>
+        <pre>{escape(str(e))}</pre>
 
         <p>
             <a href="/autorizar">
@@ -784,12 +938,12 @@ def ml_teste():
 
         <p>
             <b>Usuário:</b>
-            {nickname}
+            {escape(str(nickname))}
         </p>
 
         <p>
             <b>ID:</b>
-            {user_id}
+            {escape(str(user_id))}
         </p>
 
         <hr>
@@ -804,7 +958,7 @@ def ml_teste():
         return f"""
         <h1>❌ Erro no Mercado Livre</h1>
 
-        <pre>{e}</pre>
+        <pre>{escape(str(e))}</pre>
 
         <a href="/autorizar">
             🔐 Autorizar novamente
@@ -813,7 +967,7 @@ def ml_teste():
 
 
 # ============================================================
-# TESTAR BUSCA DE PRODUTOS
+# TESTAR BUSCA
 # ============================================================
 
 @app.route("/buscar-teste")
@@ -829,7 +983,13 @@ def buscar_teste():
             <h1>❌ Nenhum produto encontrado</h1>
 
             <p>
-                A API não retornou produtos.
+                O buscador não encontrou produtos
+                de catálogo com anúncios disponíveis.
+            </p>
+
+            <p>
+                Veja os logs do Render para descobrir
+                exatamente em qual consulta ocorreu o problema.
             </p>
 
             <a href="/">
@@ -837,21 +997,16 @@ def buscar_teste():
             </a>
             """
 
-        html = """
+        html = f"""
         <h1>🔎 Produtos encontrados</h1>
 
         <p>
             Quantidade encontrada:
-            <b>PRODUTOS_TOTAL</b>
+            <b>{len(produtos)}</b>
         </p>
 
         <hr>
         """
-
-        html = html.replace(
-            "PRODUTOS_TOTAL",
-            str(len(produtos))
-        )
 
         for produto in produtos[:20]:
 
@@ -872,9 +1027,9 @@ def buscar_teste():
 
             html += f"""
             <p>
-                <b>{titulo}</b><br>
-                ID: {item_id}<br>
-                Preço: {preco}
+                <b>{escape(str(titulo))}</b><br>
+                ID: {escape(str(item_id))}<br>
+                Preço: {escape(str(preco))}
             </p>
 
             <hr>
@@ -893,7 +1048,7 @@ def buscar_teste():
         return f"""
         <h1>❌ Erro na busca</h1>
 
-        <pre>{e}</pre>
+        <pre>{escape(str(e))}</pre>
 
         <a href="/">
             Voltar
@@ -941,7 +1096,12 @@ def oferta_teste():
 
                 analisados += 1
 
-            except Exception:
+            except Exception as e:
+
+                print(
+                    f"[ML] Erro analisando "
+                    f"{item_id}: {e}"
+                )
 
                 continue
 
@@ -970,26 +1130,23 @@ def oferta_teste():
 
             oferta = {
 
-                "titulo": titulo,
+                "titulo":
+                    titulo,
 
                 "preco":
-                    promocao[
-                        "preco"
-                    ],
+                    promocao["preco"],
 
                 "preco_original":
-                    promocao[
-                        "preco_original"
-                    ],
+                    promocao["preco_original"],
 
                 "desconto":
-                    promocao[
-                        "desconto"
-                    ],
+                    promocao["desconto"],
 
-                "imagem": imagem,
+                "imagem":
+                    imagem,
 
-                "link": link
+                "link":
+                    link
             }
 
             enviar_telegram(
@@ -1000,7 +1157,7 @@ def oferta_teste():
             <h1>🔥 OFERTA ENVIADA!</h1>
 
             <h2>
-                {titulo}
+                {escape(str(titulo))}
             </h2>
 
             <p>
@@ -1037,9 +1194,9 @@ def oferta_teste():
         </p>
 
         <p>
-            Talvez os produtos encontrados
-            não estejam com promoção compatível
-            com o filtro atual.
+            Nenhum dos produtos encontrados
+            possui um desconto compatível com
+            os filtros atuais.
         </p>
 
         <p>
@@ -1054,7 +1211,7 @@ def oferta_teste():
         return f"""
         <h1>❌ Erro ao procurar oferta</h1>
 
-        <pre>{e}</pre>
+        <pre>{escape(str(e))}</pre>
         """, 500
 
 
@@ -1092,7 +1249,7 @@ def telegram_teste():
         <h1>✅ Telegram funcionando!</h1>
 
         <p>
-            A mensagem foi enviada para o grupo.
+            A mensagem foi enviada para o Telegram.
         </p>
         """
 
@@ -1101,7 +1258,7 @@ def telegram_teste():
         return f"""
         <h1>❌ Erro no Telegram</h1>
 
-        <pre>{e}</pre>
+        <pre>{escape(str(e))}</pre>
         """, 500
 
 
@@ -1122,3 +1279,4 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
+```
