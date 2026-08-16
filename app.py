@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 app = Flask(__name__)
 
 # ============================================================
-# CONFIGURAÇÃO
+# CONFIGURAÇÕES
 # ============================================================
 
 REDIRECT_URI = "https://mercado-livre-oauth.onrender.com/callback"
@@ -17,10 +17,14 @@ ML_AUTH_URL = "https://auth.mercadolivre.com.br/authorization"
 ML_TOKEN_URL = "https://api.mercadolibre.com/oauth/token"
 ML_API_URL = "https://api.mercadolibre.com"
 
-# Configuração das ofertas
+# Filtros das ofertas
 DESCONTO_MINIMO = 20
 PRECO_MINIMO = 20
 PRECO_MAXIMO = 5000
+
+# ============================================================
+# TOKENS
+# ============================================================
 
 tokens = {
     "access_token": os.environ.get("ML_ACCESS_TOKEN"),
@@ -39,29 +43,54 @@ def get_credentials():
     client_id = os.environ.get("ML_CLIENT_ID")
     client_secret = os.environ.get("ML_CLIENT_SECRET")
 
-    if not client_id or not client_secret:
+    if not client_id:
         raise RuntimeError(
-            "ML_CLIENT_ID ou ML_CLIENT_SECRET não configurado."
+            "ML_CLIENT_ID não está configurado no Render."
+        )
+
+    if not client_secret:
+        raise RuntimeError(
+            "ML_CLIENT_SECRET não está configurado no Render."
         )
 
     return client_id, client_secret
 
 
 # ============================================================
-# TOKENS
+# SALVAR TOKENS
 # ============================================================
 
 def save_tokens(data):
-    tokens["access_token"] = data.get("access_token")
-    tokens["refresh_token"] = data.get("refresh_token")
 
-    expires_in = int(data.get("expires_in", 21600))
+    access_token = data.get("access_token")
+    refresh_token = data.get("refresh_token")
+
+    if not access_token:
+        raise RuntimeError(
+            "Mercado Livre não retornou Access Token."
+        )
+
+    tokens["access_token"] = access_token
+
+    if refresh_token:
+        tokens["refresh_token"] = refresh_token
+
+    expires_in = int(
+        data.get("expires_in", 21600)
+    )
 
     # Renova 5 minutos antes de expirar
-    tokens["expires_at"] = time.time() + expires_in - 300
+    tokens["expires_at"] = (
+        time.time() + expires_in - 300
+    )
 
+
+# ============================================================
+# TROCAR CODE POR TOKEN
+# ============================================================
 
 def exchange_code_for_token(code):
+
     client_id, client_secret = get_credentials()
 
     response = requests.post(
@@ -74,37 +103,41 @@ def exchange_code_for_token(code):
             "redirect_uri": REDIRECT_URI
         },
         headers={
-            "accept": "application/json",
-            "content-type": "application/x-www-form-urlencoded"
+            "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded"
         },
-        timeout=20
+        timeout=30
     )
 
     if not response.ok:
         raise RuntimeError(
-            f"Erro ao obter token: {response.text}"
+            "Erro ao trocar código por token:\n"
+            + response.text
         )
 
     data = response.json()
-
-    if not data.get("access_token"):
-        raise RuntimeError(
-            f"Access Token não recebido: {data}"
-        )
 
     save_tokens(data)
 
     return data
 
 
+# ============================================================
+# RENOVAR ACCESS TOKEN
+# ============================================================
+
 def refresh_access_token():
+
     with token_lock:
 
-        refresh_token = tokens.get("refresh_token")
+        refresh_token = tokens.get(
+            "refresh_token"
+        )
 
         if not refresh_token:
             raise RuntimeError(
-                "Refresh Token não disponível. Autorize novamente."
+                "Refresh Token não encontrado. "
+                "É necessário autorizar novamente."
             )
 
         client_id, client_secret = get_credentials()
@@ -118,44 +151,53 @@ def refresh_access_token():
                 "refresh_token": refresh_token
             },
             headers={
-                "accept": "application/json",
-                "content-type": "application/x-www-form-urlencoded"
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded"
             },
-            timeout=20
+            timeout=30
         )
 
         if not response.ok:
             raise RuntimeError(
-                f"Erro ao renovar token: {response.text}"
+                "Erro ao renovar Access Token:\n"
+                + response.text
             )
 
         data = response.json()
-
-        if not data.get("access_token"):
-            raise RuntimeError(
-                f"Novo Access Token não recebido: {data}"
-            )
 
         save_tokens(data)
 
         return data
 
 
+# ============================================================
+# PEGAR ACCESS TOKEN
+# ============================================================
+
 def get_access_token():
-    if not tokens.get("access_token"):
+
+    access_token = tokens.get(
+        "access_token"
+    )
+
+    if not access_token:
         raise RuntimeError(
             "Mercado Livre não está autorizado. "
-            "Abra /autorizar primeiro."
+            "Acesse /autorizar."
         )
 
-    if time.time() >= tokens.get("expires_at", 0):
+    if time.time() >= tokens.get(
+        "expires_at",
+        0
+    ):
+
         refresh_access_token()
 
     return tokens["access_token"]
 
 
 # ============================================================
-# API MERCADO LIVRE
+# REQUISIÇÃO À API DO MERCADO LIVRE
 # ============================================================
 
 def ml_get(endpoint, params=None):
@@ -163,35 +205,41 @@ def ml_get(endpoint, params=None):
     access_token = get_access_token()
 
     response = requests.get(
-        f"{ML_API_URL}{endpoint}",
+        ML_API_URL + endpoint,
         params=params,
         headers={
-            "Authorization": f"Bearer {access_token}",
+            "Authorization": "Bearer " + access_token,
             "Accept": "application/json"
         },
-        timeout=20
+        timeout=30
     )
 
+    # Access Token inválido/expirado
     if response.status_code == 401:
 
         refresh_access_token()
 
-        access_token = tokens["access_token"]
+        access_token = tokens[
+            "access_token"
+        ]
 
         response = requests.get(
-            f"{ML_API_URL}{endpoint}",
+            ML_API_URL + endpoint,
             params=params,
             headers={
-                "Authorization": f"Bearer {access_token}",
+                "Authorization": "Bearer " + access_token,
                 "Accept": "application/json"
             },
-            timeout=20
+            timeout=30
         )
 
     if not response.ok:
+
         raise RuntimeError(
-            f"Erro API Mercado Livre {response.status_code}: "
-            f"{response.text}"
+            "Erro na API do Mercado Livre "
+            + str(response.status_code)
+            + ":\n"
+            + response.text
         )
 
     return response.json()
@@ -203,178 +251,231 @@ def ml_get(endpoint, params=None):
 
 def buscar_produtos():
 
-    print("====================================")
-print("PRODUTOS ENCONTRADOS:", len(produtos))
-print("====================================")
-
-for p in produtos[:10]:
-    print(
-        p.get("id"),
-        "|",
-        p.get("title"),
-        "|",
-        p.get("price"),
-        "|",
-        p.get("original_price")
-    )
-
     consultas = [
-        "ofertas",
-        "eletronicos",
-        "casa",
         "celular",
-        "informatica"
+        "notebook",
+        "fone de ouvido",
+        "smart tv",
+        "mouse",
+        "teclado",
+        "monitor",
+        "air fryer",
+        "casa",
+        "eletronicos"
     ]
 
-    encontrados = []
+    produtos = {}
 
     for consulta in consultas:
 
         try:
 
-            resposta = requests.get(
-                f"{ML_API_URL}/sites/MLB/search",
+            response = requests.get(
+                ML_API_URL + "/sites/MLB/search",
                 params={
                     "q": consulta,
                     "limit": 20
                 },
-                timeout=20
+                timeout=30
             )
 
-            if not resposta.ok:
+            if not response.ok:
                 continue
 
-            dados = resposta.json()
+            data = response.json()
 
-            for produto in dados.get("results", []):
+            resultados = data.get(
+                "results",
+                []
+            )
 
-                if produto.get("id"):
+            for produto in resultados:
 
-                    encontrados.append(produto)
+                item_id = produto.get("id")
+
+                if item_id:
+                    produtos[item_id] = produto
 
         except Exception:
             continue
 
-    # Remove produtos repetidos
-    unicos = {}
-
-    for produto in encontrados:
-        unicos[produto["id"]] = produto
-
-    return list(unicos.values())
-
-
-# ============================================================
-# PEGAR PREÇO REAL / PROMOÇÃO
-# ============================================================
-
-def obter_preco_promocional(item_id):
-
-    dados = ml_get(
-        f"/items/{item_id}/prices"
+    return list(
+        produtos.values()
     )
 
-    precos = dados.get("prices", [])
 
-    melhor = None
+# ============================================================
+# OBTER PREÇOS DO PRODUTO
+# ============================================================
+
+def obter_precos(item_id):
+
+    data = ml_get(
+        "/items/" + item_id + "/prices"
+    )
+
+    return data.get(
+        "prices",
+        []
+    )
+
+
+# ============================================================
+# ENCONTRAR PROMOÇÃO
+# ============================================================
+
+def encontrar_promocao(item_id):
+
+    precos = obter_precos(
+        item_id
+    )
+
+    melhor_oferta = None
 
     for preco in precos:
 
-        tipo = preco.get("type")
+        valor = preco.get(
+            "amount"
+        )
 
-        amount = preco.get("amount")
-        regular_amount = preco.get("regular_amount")
+        valor_original = preco.get(
+            "regular_amount"
+        )
 
-        if not amount or not regular_amount:
+        if valor is None:
             continue
 
-        if regular_amount <= amount:
+        if valor_original is None:
             continue
 
-        # Verifica se a promoção está ativa
-        conditions = preco.get("conditions", {})
+        try:
 
-        inicio = conditions.get("start_time")
-        fim = conditions.get("end_time")
+            valor = float(valor)
+            valor_original = float(
+                valor_original
+            )
 
-        # O Mercado Livre pode retornar condições sem datas.
-        # Nesse caso ainda podemos analisar o preço.
-        agora = time.time()
+        except (TypeError, ValueError):
+            continue
 
-        # Para esta primeira versão,
-        # usamos o preço promocional disponível.
+        if valor_original <= valor:
+            continue
+
+        if valor < PRECO_MINIMO:
+            continue
+
+        if valor > PRECO_MAXIMO:
+            continue
 
         desconto = (
-            (regular_amount - amount)
-            / regular_amount
+            (valor_original - valor)
+            / valor_original
         ) * 100
 
         if desconto < DESCONTO_MINIMO:
             continue
 
-        if amount < PRECO_MINIMO:
-            continue
-
-        if amount > PRECO_MAXIMO:
-            continue
-
-        candidato = {
-            "preco": float(amount),
-            "preco_original": float(regular_amount),
-            "desconto": round(desconto, 1),
-            "tipo": tipo,
-            "inicio": inicio,
-            "fim": fim
+        oferta = {
+            "preco": valor,
+            "preco_original": valor_original,
+            "desconto": desconto
         }
 
-        if melhor is None:
-            melhor = candidato
+        if melhor_oferta is None:
+            melhor_oferta = oferta
 
-        elif candidato["desconto"] > melhor["desconto"]:
-            melhor = candidato
+        elif desconto > melhor_oferta[
+            "desconto"
+        ]:
+            melhor_oferta = oferta
 
-    return melhor
+    return melhor_oferta
 
 
 # ============================================================
-# TELEGRAM
+# ENVIAR MENSAGEM PARA TELEGRAM
 # ============================================================
 
 def enviar_telegram(produto):
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    bot_token = os.environ.get(
+        "TELEGRAM_BOT_TOKEN"
+    )
 
-    if not token or not chat_id:
+    chat_id = os.environ.get(
+        "TELEGRAM_CHAT_ID"
+    )
+
+    if not bot_token:
         raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN ou TELEGRAM_CHAT_ID não configurado."
+            "TELEGRAM_BOT_TOKEN não configurado."
         )
 
-    titulo = produto["titulo"]
-    preco = produto["preco"]
-    preco_original = produto["preco_original"]
-    desconto = produto["desconto"]
-    imagem = produto.get("imagem")
-    link = produto["link"]
+    if not chat_id:
+        raise RuntimeError(
+            "TELEGRAM_CHAT_ID não configurado."
+        )
+
+    titulo = produto[
+        "titulo"
+    ]
+
+    preco = produto[
+        "preco"
+    ]
+
+    preco_original = produto[
+        "preco_original"
+    ]
+
+    desconto = produto[
+        "desconto"
+    ]
+
+    link = produto.get(
+        "link",
+        ""
+    )
+
+    imagem = produto.get(
+        "imagem"
+    )
+
+    # Formatação brasileira
+    preco_formatado = (
+        f"R$ {preco:,.2f}"
+        .replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+    )
+
+    original_formatado = (
+        f"R$ {preco_original:,.2f}"
+        .replace(",", "X")
+        .replace(".", ",")
+        .replace("X", ".")
+    )
 
     texto = (
-        "🔥 MEGA DESCONTO\n\n"
+        "🔥 MEGA DESCONTO 🔥\n\n"
         f"🛒 {titulo}\n\n"
         "💰 OFERTA ENCONTRADA!\n\n"
-        f"DE: R$ {preco_original:,.2f}\n"
-        f"POR: R$ {preco:,.2f}\n"
+        f"❌ De: {original_formatado}\n"
+        f"✅ Por: {preco_formatado}\n"
         f"📉 {desconto:.0f}% OFF\n\n"
-        "🛍️ Confira a oferta:\n"
+        "🛍️ Ver oferta:\n"
         f"{link}"
     )
 
-    # Ajusta formato brasileiro
-    texto = texto.replace(",", "X").replace(".", ",").replace("X", ".")
+    # Telegram limita caption de foto.
+    texto = texto[:1000]
 
     if imagem:
 
         response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendPhoto",
+            "https://api.telegram.org/bot"
+            + bot_token
+            + "/sendPhoto",
             json={
                 "chat_id": chat_id,
                 "photo": imagem,
@@ -386,7 +487,9 @@ def enviar_telegram(produto):
     else:
 
         response = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
+            "https://api.telegram.org/bot"
+            + bot_token
+            + "/sendMessage",
             json={
                 "chat_id": chat_id,
                 "text": texto
@@ -395,8 +498,10 @@ def enviar_telegram(produto):
         )
 
     if not response.ok:
+
         raise RuntimeError(
-            f"Telegram retornou erro: {response.text}"
+            "Erro no Telegram:\n"
+            + response.text
         )
 
     return response.json()
@@ -410,49 +515,106 @@ def enviar_telegram(produto):
 def home():
 
     return """
-    <h1>🔥 Mega Desconto</h1>
+    <!DOCTYPE html>
 
-    <p>Servidor online!</p>
+    <html lang="pt-BR">
 
-    <hr>
+    <head>
+        <meta charset="UTF-8">
 
-    <p>
-        <a href="/autorizar">
-            🔐 Autorizar Mercado Livre
-        </a>
-    </p>
+        <title>Mega Desconto</title>
 
-    <p>
-        <a href="/ml-teste">
-            🛒 Testar Mercado Livre
-        </a>
-    </p>
+        <style>
 
-    <p>
-        <a href="/oferta-teste">
-            🔥 Buscar uma oferta de teste
-        </a>
-    </p>
+            body {
+                font-family: Arial;
+                background: #f4f4f4;
+                text-align: center;
+                padding: 40px;
+            }
 
-    <p>
-        <a href="/telegram-teste">
-            📲 Testar Telegram
-        </a>
-    </p>
+            .box {
+                background: white;
+                max-width: 600px;
+                margin: auto;
+                padding: 30px;
+                border-radius: 15px;
+                box-shadow: 0 5px 20px
+                    rgba(0,0,0,0.1);
+            }
+
+            a {
+                display: block;
+                padding: 15px;
+                margin: 15px;
+                background: #ffe600;
+                color: #222;
+                text-decoration: none;
+                border-radius: 10px;
+                font-weight: bold;
+            }
+
+        </style>
+
+    </head>
+
+    <body>
+
+        <div class="box">
+
+            <h1>🔥 Mega Desconto</h1>
+
+            <p>
+                Bot de promoções do Mercado Livre
+            </p>
+
+            <hr>
+
+            <a href="/autorizar">
+                🔐 Conectar Mercado Livre
+            </a>
+
+            <a href="/ml-teste">
+                🛒 Testar Mercado Livre
+            </a>
+
+            <a href="/buscar-teste">
+                🔎 Testar busca de produtos
+            </a>
+
+            <a href="/oferta-teste">
+                🔥 Buscar oferta de teste
+            </a>
+
+            <a href="/telegram-teste">
+                📲 Testar Telegram
+            </a>
+
+        </div>
+
+    </body>
+
+    </html>
     """
 
 
 # ============================================================
-# AUTORIZAÇÃO
+# AUTORIZAR MERCADO LIVRE
 # ============================================================
 
 @app.route("/autorizar")
 def autorizar():
 
-    client_id = os.environ.get("ML_CLIENT_ID")
+    client_id = os.environ.get(
+        "ML_CLIENT_ID"
+    )
 
     if not client_id:
-        return "ML_CLIENT_ID não configurado.", 500
+
+        return (
+            "ML_CLIENT_ID não configurado.",
+            500
+        )
 
     parametros = {
         "response_type": "code",
@@ -467,19 +629,32 @@ def autorizar():
     )
 
     return f"""
-    <script>
-        window.location.href = "{url}";
-    </script>
+    <html>
 
-    <p>
-        Redirecionando para o Mercado Livre...
-    </p>
+    <head>
 
-    <p>
-        <a href="{url}">
-            Clique aqui
-        </a>
-    </p>
+        <meta http-equiv="refresh"
+              content="0;url={url}">
+
+    </head>
+
+    <body>
+
+        <p>
+            Redirecionando para o Mercado Livre...
+        </p>
+
+        <p>
+
+            <a href="{url}">
+                Clique aqui
+            </a>
+
+        </p>
+
+    </body>
+
+    </html>
     """
 
 
@@ -490,74 +665,50 @@ def autorizar():
 @app.route("/callback")
 def callback():
 
-    erro = request.args.get("error")
+    erro = request.args.get(
+        "error"
+    )
 
     if erro:
+
         return f"""
-        <h1>❌ Erro</h1>
+        <h1>❌ Erro na autorização</h1>
         <p>{erro}</p>
         """, 400
 
-    code = request.args.get("code")
+    code = request.args.get(
+        "code"
+    )
 
     if not code:
+
         return """
         <h1>❌ Código não recebido</h1>
         """, 400
 
     try:
 
-        data = exchange_code_for_token(code)
+        exchange_code_for_token(
+            code
+        )
 
         return """
         <h1>✅ Mercado Livre conectado!</h1>
 
         <p>
-            Autorização concluída com sucesso.
+            A autorização foi concluída.
         </p>
 
         <p>
             <a href="/ml-teste">
-                🛒 Testar Mercado Livre
+                🛒 Testar conexão
             </a>
         </p>
 
         <p>
-            <a href="/oferta-teste">
-                🔥 Buscar oferta de teste
+            <a href="/buscar-teste">
+                🔎 Testar busca
             </a>
-        </p>
-        """
-
-    except Exception as e:
-
-        return f"""
-        <h1>❌ Erro na autorização</h1>
-
-        <p>{e}</p>
-        """, 500
-
-
-# ============================================================
-# TESTE MERCADO LIVRE
-# ============================================================
-
-@app.route("/ml-teste")
-def ml_teste():
-
-    try:
-
-        usuario = ml_get("/users/me")
-
-        return f"""
-        <h1>✅ Mercado Livre funcionando!</h1>
-
-        <p>
-            Usuário: {usuario.get("nickname", "não informado")}
-        </p>
-
-        <p>
-            ID: {usuario.get("id", "não informado")}
         </p>
 
         <p>
@@ -572,7 +723,7 @@ def ml_teste():
         return f"""
         <h1>❌ Erro</h1>
 
-        <p>{e}</p>
+        <pre>{e}</pre>
 
         <p>
             <a href="/autorizar">
@@ -583,7 +734,152 @@ def ml_teste():
 
 
 # ============================================================
-# PRIMEIRA OFERTA DE TESTE
+# TESTAR CONEXÃO
+# ============================================================
+
+@app.route("/ml-teste")
+def ml_teste():
+
+    try:
+
+        usuario = ml_get(
+            "/users/me"
+        )
+
+        nickname = usuario.get(
+            "nickname",
+            "não informado"
+        )
+
+        user_id = usuario.get(
+            "id",
+            "não informado"
+        )
+
+        return f"""
+        <h1>✅ Mercado Livre funcionando!</h1>
+
+        <p>
+            <b>Usuário:</b>
+            {nickname}
+        </p>
+
+        <p>
+            <b>ID:</b>
+            {user_id}
+        </p>
+
+        <hr>
+
+        <a href="/buscar-teste">
+            🔎 Testar busca
+        </a>
+        """
+
+    except Exception as e:
+
+        return f"""
+        <h1>❌ Erro no Mercado Livre</h1>
+
+        <pre>{e}</pre>
+
+        <a href="/autorizar">
+            🔐 Autorizar novamente
+        </a>
+        """, 500
+
+
+# ============================================================
+# TESTAR BUSCA DE PRODUTOS
+# ============================================================
+
+@app.route("/buscar-teste")
+def buscar_teste():
+
+    try:
+
+        produtos = buscar_produtos()
+
+        if not produtos:
+
+            return """
+            <h1>❌ Nenhum produto encontrado</h1>
+
+            <p>
+                A API não retornou produtos.
+            </p>
+
+            <a href="/">
+                Voltar
+            </a>
+            """
+
+        html = """
+        <h1>🔎 Produtos encontrados</h1>
+
+        <p>
+            Quantidade encontrada:
+            <b>PRODUTOS_TOTAL</b>
+        </p>
+
+        <hr>
+        """
+
+        html = html.replace(
+            "PRODUTOS_TOTAL",
+            str(len(produtos))
+        )
+
+        for produto in produtos[:20]:
+
+            titulo = produto.get(
+                "title",
+                "Sem título"
+            )
+
+            preco = produto.get(
+                "price",
+                "N/A"
+            )
+
+            item_id = produto.get(
+                "id",
+                "N/A"
+            )
+
+            html += f"""
+            <p>
+                <b>{titulo}</b><br>
+                ID: {item_id}<br>
+                Preço: {preco}
+            </p>
+
+            <hr>
+            """
+
+        html += """
+        <a href="/oferta-teste">
+            🔥 Procurar oferta
+        </a>
+        """
+
+        return html
+
+    except Exception as e:
+
+        return f"""
+        <h1>❌ Erro na busca</h1>
+
+        <pre>{e}</pre>
+
+        <a href="/">
+            Voltar
+        </a>
+        """, 500
+
+
+# ============================================================
+# BUSCAR UMA OFERTA
 # ============================================================
 
 @app.route("/oferta-teste")
@@ -594,90 +890,133 @@ def oferta_teste():
         produtos = buscar_produtos()
 
         if not produtos:
+
             return """
-            <h1>❌ Nenhum produto encontrado.</h1>
+            <h1>❌ Nenhum produto encontrado</h1>
+
+            <p>
+                A busca não retornou produtos.
+            </p>
             """
 
         analisados = 0
 
         for produto in produtos:
 
-            item_id = produto.get("id")
+            item_id = produto.get(
+                "id"
+            )
+
+            if not item_id:
+                continue
 
             try:
 
-                promocao = obter_preco_promocional(item_id)
+                promocao = encontrar_promocao(
+                    item_id
+                )
 
                 analisados += 1
 
-                if not promocao:
-                    continue
-
-                titulo = produto.get(
-                    "title",
-                    "Produto sem título"
-                )
-
-                imagem = (
-                    produto.get("thumbnail")
-                    or produto.get("secure_thumbnail")
-                )
-
-                link = produto.get(
-                    "permalink",
-                    ""
-                )
-
-                dados = {
-                    "id": item_id,
-                    "titulo": titulo,
-                    "preco": promocao["preco"],
-                    "preco_original": promocao["preco_original"],
-                    "desconto": promocao["desconto"],
-                    "imagem": imagem,
-                    "link": link
-                }
-
-                enviar_telegram(dados)
-
-                return f"""
-                <h1>🔥 Oferta enviada!</h1>
-
-                <p>
-                    <b>{titulo}</b>
-                </p>
-
-                <p>
-                    De: R$ {promocao["preco_original"]:.2f}
-                </p>
-
-                <p>
-                    Por: R$ {promocao["preco"]:.2f}
-                </p>
-
-                <p>
-                    Desconto:
-                    {promocao["desconto"]:.1f}%
-                </p>
-
-                <p>
-                    O produto foi enviado para o Telegram.
-                </p>
-                """
-
             except Exception:
+
                 continue
 
+            if not promocao:
+                continue
+
+            titulo = produto.get(
+                "title",
+                "Produto"
+            )
+
+            imagem = (
+                produto.get(
+                    "secure_thumbnail"
+                )
+                or
+                produto.get(
+                    "thumbnail"
+                )
+            )
+
+            link = produto.get(
+                "permalink",
+                ""
+            )
+
+            oferta = {
+
+                "titulo": titulo,
+
+                "preco":
+                    promocao[
+                        "preco"
+                    ],
+
+                "preco_original":
+                    promocao[
+                        "preco_original"
+                    ],
+
+                "desconto":
+                    promocao[
+                        "desconto"
+                    ],
+
+                "imagem": imagem,
+
+                "link": link
+            }
+
+            enviar_telegram(
+                oferta
+            )
+
+            return f"""
+            <h1>🔥 OFERTA ENVIADA!</h1>
+
+            <h2>
+                {titulo}
+            </h2>
+
+            <p>
+                De:
+                R$ {promocao["preco_original"]:.2f}
+            </p>
+
+            <p>
+                Por:
+                R$ {promocao["preco"]:.2f}
+            </p>
+
+            <p>
+                Desconto:
+                {promocao["desconto"]:.1f}%
+            </p>
+
+            <p>
+                📲 A oferta foi enviada para o Telegram.
+            </p>
+            """
+
         return f"""
-        <h1>😕 Nenhuma oferta encontrada</h1>
+        <h1>😕 Nenhuma promoção encontrada</h1>
 
         <p>
-            Foram analisados {analisados} produtos.
+            Produtos analisados:
+            <b>{analisados}</b>
         </p>
 
         <p>
-            O filtro atual exige pelo menos
-            {DESCONTO_MINIMO}% de desconto.
+            Desconto mínimo:
+            <b>{DESCONTO_MINIMO}%</b>
+        </p>
+
+        <p>
+            Talvez os produtos encontrados
+            não estejam com promoção compatível
+            com o filtro atual.
         </p>
 
         <p>
@@ -690,9 +1029,9 @@ def oferta_teste():
     except Exception as e:
 
         return f"""
-        <h1>❌ Erro ao buscar ofertas</h1>
+        <h1>❌ Erro ao procurar oferta</h1>
 
-        <p>{e}</p>
+        <pre>{e}</pre>
         """, 500
 
 
@@ -706,19 +1045,31 @@ def telegram_teste():
     try:
 
         enviar_telegram({
-            "titulo": "Teste Mega Desconto",
-            "preco": 79.90,
-            "preco_original": 99.90,
-            "desconto": 20,
-            "imagem": None,
-            "link": "https://www.mercadolivre.com.br/"
+
+            "titulo":
+                "Teste do Mega Desconto",
+
+            "preco":
+                79.90,
+
+            "preco_original":
+                99.90,
+
+            "desconto":
+                20,
+
+            "imagem":
+                None,
+
+            "link":
+                "https://www.mercadolivre.com.br/"
         })
 
         return """
         <h1>✅ Telegram funcionando!</h1>
 
         <p>
-            Mensagem enviada para o grupo.
+            A mensagem foi enviada para o grupo.
         </p>
         """
 
@@ -727,7 +1078,7 @@ def telegram_teste():
         return f"""
         <h1>❌ Erro no Telegram</h1>
 
-        <p>{e}</p>
+        <pre>{e}</pre>
         """, 500
 
 
@@ -738,7 +1089,10 @@ def telegram_teste():
 if __name__ == "__main__":
 
     port = int(
-        os.environ.get("PORT", 10000)
+        os.environ.get(
+            "PORT",
+            10000
+        )
     )
 
     app.run(
